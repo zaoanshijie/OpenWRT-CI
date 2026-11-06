@@ -70,6 +70,19 @@ jobs:
           set -uo pipefail
           RUN_URL="${RUN_URL:-https://github.com/$GH_REPO/actions/runs/$RUN_ID}"
 
+          # 运行元信息统一从 API 取，手动触发时也能拿到完整内容
+          meta=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" 2>/dev/null)
+          if [ -n "$meta" ]; then
+            {
+              echo "RUN_URL=$(printf '%s' "$meta" | jq -r '.html_url')"
+              echo "RUN_SHA=$(printf '%s' "$meta" | jq -r '.head_sha')"
+              echo "RUN_BRANCH=$(printf '%s' "$meta" | jq -r '.head_branch')"
+              echo "RUN_EVENT=$(printf '%s' "$meta" | jq -r '.event')"
+              echo "RUN_ATTEMPT=$(printf '%s' "$meta" | jq -r '.run_attempt')"
+              echo "RUN_START=$(printf '%s' "$meta" | jq -r '.run_started_at')"
+            } >> "$GITHUB_ENV"
+          fi
+
           jobs=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --paginate \
             --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled")
                   | "\(.name) — \(.conclusion)"' 2>/dev/null | head -30)
