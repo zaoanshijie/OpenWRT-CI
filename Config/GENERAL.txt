@@ -1,12 +1,17 @@
+#本仓库相对上游 OpenWRT-CI 只额外增加这三组插件：
+#  socat / tailscale（含 luci-app-tailscale-community） / ddns-go（含 luci-app-ddns-go）
+#其余配置与上游保持一致，不做删减。
 #科学插件调整
 CONFIG_PACKAGE_luci-app-homeproxy=y
 #增加插件
 CONFIG_PACKAGE_luci-app-autoreboot=y
+CONFIG_PACKAGE_luci-app-ddns-go=y
 CONFIG_PACKAGE_luci-app-gecoosac=y
 CONFIG_PACKAGE_luci-app-mini-diskmanager=y
 CONFIG_PACKAGE_luci-app-natmapt=y
 CONFIG_PACKAGE_luci-app-partexp=y
 CONFIG_PACKAGE_luci-app-samba4=y
+CONFIG_PACKAGE_luci-app-tailscale-community=y
 CONFIG_PACKAGE_luci-app-upnp=y
 CONFIG_PACKAGE_luci-app-wolultra=y
 #删除插件
@@ -88,6 +93,7 @@ CONFIG_PACKAGE_cgdisk=y
 CONFIG_PACKAGE_coremark=y
 CONFIG_PACKAGE_cpufreq=y
 CONFIG_PACKAGE_curl=y
+CONFIG_PACKAGE_ddns-go=y
 CONFIG_PACKAGE_dmesg=y
 CONFIG_PACKAGE_exfat-fsck=y
 CONFIG_PACKAGE_exfat-mkfs=y
@@ -117,8 +123,24 @@ CONFIG_PACKAGE_sfdisk=y
 CONFIG_PACKAGE_sgdisk=y
 CONFIG_PACKAGE_smartmontools=y
 CONFIG_PACKAGE_smartmontools-drivedb=y
+CONFIG_PACKAGE_socat=y
+CONFIG_SOCAT_SSL=y
 CONFIG_PACKAGE_stuntman-client=y
+CONFIG_PACKAGE_tailscale=y
 CONFIG_PACKAGE_usb-modeswitch=y
 CONFIG_PACKAGE_usbmuxd=y
 CONFIG_PACKAGE_usbutils=y
 CONFIG_PACKAGE_xz-utils=y
+#Python支持
+#python3 为元包，会自带 python3-openssl/email/xml/sqlite 等标准库模块；
+#空间紧张时可改为 python3-light（但 paho-mqtt 走 TLS 会缺 ssl 模块）
+CONFIG_PACKAGE_python3=y
+#cryptodome 依赖 python3-cffi、libgmp，paho-mqtt 依赖 python3-uuid/logging/urllib，均由依赖自动带入
+CONFIG_PACKAGE_python3-cryptodome=y
+CONFIG_PACKAGE_python3-paho-mqtt=y
+CONFIG_PACKAGE_python3-typing-extensions=y
+#时区数据
+#装了之后 /etc/init.d/system 会把 /etc/localtime 链到真实 tzfile，
+#Go(tailscale/ddns-go) 与 python3 zoneinfo 才能按名字解析时区；不加则只有 /etc/TZ 的 POSIX 串(CST-8)
+CONFIG_PACKAGE_zoneinfo-core=y
+CONFIG_PACKAGE_zoneinfo-asia=y

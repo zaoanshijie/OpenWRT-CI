@@ -1,0 +1,183 @@
+# SPDX-License-Identifier: MIT
+# 构建结果通知
+#
+# 由平台编译工作流结束事件触发（workflow_run），在独立的 runner 上运行，
+# 因此即使编译 job 本身崩溃、日志都没上传，通知依然能发出来。
+#
+# 失败：开启一个 GitHub Issue（标题固定为「[CI] <工作流> 编译失败」），
+#       若已存在则追加评论，不会刷屏；仓库关注者会收到 GitHub 邮件。
+# 成功：自动关闭对应 Issue，表示已恢复。
+# 可选：在仓库 Secrets 里加 NOTIFY_WEBHOOK（企业微信/钉钉/飞书机器人地址），
+#       失败时同时推送一条文本消息。
+#
+# 手动触发只用于验证通知链路是否正常，不影响编译。
+
+name: Notify
+
+on:
+  workflow_run:
+    workflows:
+      - Auto-Clean
+      - MTK-ALL
+      - QCA-ALL
+      - QCB-ALL
+      - OWRT-ALL
+      - AIROHA-ALL
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 要报告的运行 ID
+        required: true
+      workflow_name:
+        description: 工作流名称（用于 Issue 标题）
+        required: true
+        default: MTK-ALL
+      result:
+        description: 模拟结果
+        required: true
+        type: choice
+        default: failure
+        options:
+          - failure
+          - success
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  on-failure:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.result == 'failure' || github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+      GH_REPO: ${{github.repository}}
+      WF_NAME: ${{inputs.workflow_name || github.event.workflow_run.name}}
+      RUN_ID: ${{inputs.run_id || github.event.workflow_run.id}}
+      RUN_URL: ${{github.event.workflow_run.html_url}}
+      RUN_SHA: ${{github.event.workflow_run.head_sha}}
+      RUN_BRANCH: ${{github.event.workflow_run.head_branch}}
+      RUN_EVENT: ${{github.event.workflow_run.event}}
+      RUN_ATTEMPT: ${{github.event.workflow_run.run_attempt}}
+      RUN_START: ${{github.event.workflow_run.run_started_at}}
+      WEBHOOK: ${{secrets.NOTIFY_WEBHOOK}}
+    steps:
+      - name: 汇总失败任务与原因
+        id: info
+        run: |
+          set -uo pipefail
+          RUN_URL="${RUN_URL:-https://github.com/$GH_REPO/actions/runs/$RUN_ID}"
+
+          # 运行元信息统一从 API 取，手动触发时也能拿到完整内容
+          meta=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" 2>/dev/null)
+          if [ -n "$meta" ]; then
+            {
+              echo "RUN_URL=$(printf '%s' "$meta" | jq -r '.html_url')"
+              echo "RUN_SHA=$(printf '%s' "$meta" | jq -r '.head_sha')"
+              echo "RUN_BRANCH=$(printf '%s' "$meta" | jq -r '.head_branch')"
+              echo "RUN_EVENT=$(printf '%s' "$meta" | jq -r '.event')"
+              echo "RUN_ATTEMPT=$(printf '%s' "$meta" | jq -r '.run_attempt')"
+              echo "RUN_START=$(printf '%s' "$meta" | jq -r '.run_started_at')"
+            } >> "$GITHUB_ENV"
+          fi
+
+          jobs=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled")
+                  | "\(.name) — \(.conclusion)"' 2>/dev/null | head -30)
+          [ -z "$jobs" ] && jobs="(未取到 job 明细)"
+
+          # 拉每个失败 job 的 check-run 注解，通常能直接拿到 runner 层面的原因
+          reason=""
+          for jid in $(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '.jobs[] | select(.conclusion == "failure") | .id' 2>/dev/null); do
+            msg=$(gh api "repos/$GH_REPO/check-runs/$jid/annotations" \
+              --jq '.[] | select(.annotation_level == "failure") | .message' 2>/dev/null || true)
+            [ -n "$msg" ] && reason="${reason}${msg}"$'\n'
+          done
+          reason=$(printf '%s' "$reason" | sort -u | sed '/^$/d' | head -5)
+          [ -z "$reason" ] && reason="(没有失败注解，需要查看日志)"
+
+          {
+            echo 'JOBS<<__EOF__'
+            echo "$jobs"
+            echo '__EOF__'
+            echo 'REASON<<__EOF__'
+            echo "$reason"
+            echo '__EOF__'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 开启或追加 Issue
+        env:
+          JOBS: ${{steps.info.outputs.JOBS}}
+          REASON: ${{steps.info.outputs.REASON}}
+        run: |
+          set -euo pipefail
+          RUN_URL="${RUN_URL:-https://github.com/$GH_REPO/actions/runs/$RUN_ID}"
+
+          TITLE="[CI] ${WF_NAME} 编译失败"
+          BODY="## ${WF_NAME} 构建失败
+
+          - 运行：[#${RUN_ID}](${RUN_URL})
+          - 提交：${RUN_SHA:0:7}（分支 ${RUN_BRANCH}）
+          - 触发方式：${RUN_EVENT}，第 ${RUN_ATTEMPT} 次尝试
+          - 开始时间：${RUN_START}
+
+          ### 失败的任务
+
+              ${JOBS//$'\n'/$'\n'    }
+
+          ### 失败原因（来自 check-run 注解）
+
+              ${REASON//$'\n'/$'\n'    }
+
+          > 由 Notify 工作流自动生成。该工作流下次成功时会自动关闭本 Issue。"
+
+          num=$(gh issue list --state open --limit 100 --json number,title \
+            | jq -r --arg t "$TITLE" '.[] | select(.title == $t) | .number' | head -1)
+
+          if [ -n "${num:-}" ]; then
+            gh issue comment "$num" --body "$BODY"
+            echo "已追加评论到 #$num"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi
+
+      - name: 推送到机器人（可选）
+        if: ${{ env.WEBHOOK != '' }}
+        env:
+          JOBS: ${{steps.info.outputs.JOBS}}
+        run: |
+          [ -z "${WEBHOOK:-}" ] && exit 0
+          content=$(printf '【CI】%s 编译失败\n运行：%s\n提交：%s\n失败任务：\n%s' \
+            "$WF_NAME" "$RUN_URL" "${RUN_SHA:0:7}" "$JOBS")
+          payload=$(jq -nc --arg c "$content" '{msgtype:"text",text:{content:$c}}')
+          curl -sS -m 15 -X POST -H 'Content-Type: application/json' \
+            -d "$payload" "$WEBHOOK" || true
+
+  on-success:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.result == 'success' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+      GH_REPO: ${{github.repository}}
+      WF_NAME: ${{inputs.workflow_name || github.event.workflow_run.name}}
+      RUN_ID: ${{inputs.run_id || github.event.workflow_run.id}}
+      RUN_URL: ${{github.event.workflow_run.html_url}}
+    steps:
+      - name: 关闭对应的失败 Issue
+        run: |
+          set -uo pipefail
+          RUN_URL="${RUN_URL:-https://github.com/$GH_REPO/actions/runs/$RUN_ID}"
+
+          TITLE="[CI] ${WF_NAME} 编译失败"
+          num=$(gh issue list --state open --limit 100 --json number,title \
+            | jq -r --arg t "$TITLE" '.[] | select(.title == $t) | .number' | head -1)
+
+          if [ -n "${num:-}" ]; then
+            gh issue close "$num" --comment "构建已恢复，本次运行成功：[#${RUN_ID}](${RUN_URL})"
+            echo "已关闭 #$num"
+          else
+            echo "没有待关闭的 Issue"
+          fi
